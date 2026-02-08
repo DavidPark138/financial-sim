@@ -4,50 +4,64 @@ import numpy as np
 import numpy_financial as npf
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="재무 시뮬레이션 대시보드", layout="wide")
+st.set_page_config(page_title="Shilla Financial Dashboard", layout="wide")
 
-st.title("📊 해외 프로젝트 경제성 시뮬레이터")
-st.sidebar.header("⚙️ 시나리오 변수 설정")
-
-# 1. 시뮬레이션 변수 (슬라이더)
-price_change = st.sidebar.slider("판가 변동률 (%)", -20, 20, 0)
-cost_change = st.sidebar.slider("원재료비 변동률 (%)", -20, 20, 0)
-vol_change = st.sidebar.slider("판매물량 변동률 (%)", -20, 20, 0)
-inv_change = st.sidebar.slider("투자비 변동률 (%)", -20, 20, 0)
-
-# 2. 데이터 로드 (고정 로직)
+# 엑셀 파일 읽기 함수 (좌표 정밀 매핑)
 @st.cache_data
-def get_base_data():
-    # 질문자님이 주신 엑셀의 핵심 수치들을 기본값으로 설정
-    base_investment = 590000000 
-    base_years = np.array([2028, 2029, 2030, 2031, 2032, 2033, 2034])
-    base_volume = np.array([800000] * 7)
-    base_cashflow = np.array([33326857, 198276334, 221412363, 200041262, 191477949, 195703597, 173161394])
-    return base_investment, base_volume, base_cashflow, base_years
+def load_excel_data():
+    file_path = '경제성 평가.xlsx'
+    # 1. Commercial Input 시트에서 엑셀이 계산한 원본 결과값 가져오기
+    df_comm = pd.read_excel(file_path, sheet_name='Commercial Input', header=None)
+    # 엑셀 시트의 위치에 맞춰 인덱스 조정 (C7=6,2 / F7=6,5 / F8=7,5)
+    project_name = df_comm.iloc[6, 2]
+    original_npv = df_comm.iloc[6, 5]
+    original_irr = df_comm.iloc[7, 5]
+    
+    # 2. summary 시트에서 연도별 현금흐름 가져오기
+    df_sum = pd.read_excel(file_path, sheet_name='summary', header=None)
+    years = df_sum.iloc[6, 1:8].values  # 2028-2034
+    cash_flow = df_sum.iloc[39, 1:8].values # Net Cash Flow 행 (40행)
+    
+    # 3. 투자비 가져오기 (초기 투자금)
+    df_ass = pd.read_excel(file_path, sheet_name='AP 1. Assumption', header=None)
+    investment = df_ass.iloc[13, 2] # 5.9억 원 내외
+    
+    return project_name, original_npv, original_irr, years, cash_flow, investment
 
-inv, vol, cf, years = get_base_data()
+try:
+    p_name, o_npv, o_irr, years, cf, inv = load_excel_data()
 
-# 3. 실시간 시뮬레이션 로직
-# 판가 및 물량 변동에 따른 현금흐름 재계산 (간이 로직)
-sim_inv = inv * (1 + inv_change/100)
-sim_vol_factor = (1 + vol_change/100)
-sim_price_factor = (1 + price_change/100)
-# 세후 이익 변화율 반영 (판가 변동은 이익에 직접적 영향)
-sim_cf = cf * sim_vol_factor * sim_price_factor * (1 - cost_change/200) 
+    st.title(f"📊 {p_name} 경제성 분석 (원본 대조)")
+    
+    # 원본 수치 출력
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("원본 엑셀 IRR", f"{o_irr*100:.2f}%")
+    with col2:
+        st.metric("원본 엑셀 NPV", f"{o_npv:,.0f} KRW")
 
-# IRR 계산
-full_cf = np.insert(sim_cf, 0, -sim_inv)
-sim_irr = npf.irr(full_cf)
+    st.divider()
+    st.sidebar.header("🕹️ 시뮬레이션 변수")
+    price_mod = st.sidebar.slider("판가 변동 (%)", -15, 15, 0)
+    
+    # 엑셀 로직과 동일하게 시뮬레이션 계산
+    # (세후 현금흐름에 판가 변동 반영)
+    tax_rate = 0.22
+    vol = 800000 # 평균 물량
+    base_price = 1200
+    rev_change = (price_mod/100) * base_price * vol * (1 - tax_rate)
+    
+    sim_cf = cf + rev_change
+    full_cf = np.insert(sim_cf, 0, -inv) # 0차년도 투자비 삽입
+    sim_irr = npf.irr(full_cf)
 
-# 4. 화면 출력
-col1, col2 = st.columns(2)
-with col1:
-    st.metric("예상 IRR", f"{sim_irr*100:.2f}%", delta=f"{(sim_irr-0.3839)*100:.2f}%")
-with col2:
-    st.metric("총 투자비", f"{sim_inv/1000000:,.0f} 백만원")
+    st.subheader("💡 변수 적용 시 시뮬레이션 결과")
+    st.write(f"판가를 **{price_mod}%** 변경했을 때 예상 IRR: **{sim_irr*100:.2f}%**")
 
-# 그래프
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=years, y=sim_cf, mode='lines+markers', name='시뮬레이션 현금흐름'))
-fig.update_layout(title="연도별 예상 현금흐름 추이", xaxis_title="연도", yaxis_title="Cash Flow (KRW)")
-st.plotly_chart(fig, use_container_width=True)
+    # 현금흐름 그래프
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=years, y=sim_cf, mode='lines+markers', name='Simulated CF'))
+    st.plotly_chart(fig, use_container_width=True)
+
+except Exception as e:
+    st.error(f"데이터 매핑 오류: {e}")
